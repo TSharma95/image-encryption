@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aadhaar Document Security Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: #F3F4F6; min-height: 100vh; }
+    button { font-family: inherit; }
+    input[type="file"] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useRef } = React;
+
+    // ── Real AES-256-GCM encryption via browser Web Crypto API ──────────────
+    async function encryptImageBytes(arrayBuffer, width, height) {
+      const cryptoKey = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encryptedBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, arrayBuffer);
+      const encBytes = new Uint8Array(encryptedBuffer);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      const imgData = ctx.createImageData(width, height);
+      for (let i = 0; i < imgData.data.length; i++) imgData.data[i] = encBytes[i % encBytes.length];
+      ctx.putImageData(imgData, 0, 0);
+
+      return { cryptoKey, iv, encryptedBuffer, noiseUrl: canvas.toDataURL('image/png') };
+    }
+
+    async function decryptImageBytes(encryptedBuffer, cryptoKey, iv) {
+      const decryptedBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, encryptedBuffer);
+      return URL.createObjectURL(new Blob([decryptedBuffer]));
+    }
+
+    // ── Step card ────────────────────────────────────────────────────────────
+    function StepCard({ number, title, subtitle, color, children, active, done }) {
+      const C = {
+        blue:   { bg:'#EFF6FF', border:'#BFDBFE', num:'#2563EB' },
+        orange: { bg:'#FFF7ED', border:'#FED7AA', num:'#EA580C' },
+        green:  { bg:'#F0FDF4', border:'#BBF7D0', num:'#16A34A' },
+      }[color];
+      return (
+        <div style={{ flex:1, minWidth:260, border:`2px solid ${done||active ? C.border:'#E5E7EB'}`, borderRadius:16, background:done||active ? C.bg:'#FAFAFA', padding:'1.5rem', opacity:!active&&!done?0.45:1, transition:'all 0.4s', display:'flex', flexDirection:'column', gap:12 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ width:36, height:36, borderRadius:'50%', background:done||active?C.num:'#D1D5DB', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', fontSize:15, fontWeight:700, flexShrink:0 }}>
+              {done ? '✓' : number}
+            </div>
+            <div>
+              <div style={{ fontWeight:700, fontSize:16, color:'#111827' }}>{title}</div>
+              <div style={{ fontSize:12, color:'#6B7280' }}>{subtitle}</div>
+            </div>
+          </div>
+          {children}
+        </div>
+      );
+    }
+
+    // ── Main App ─────────────────────────────────────────────────────────────
+    function App() {
+      const [originalUrl,  setOriginalUrl]  = useState(null);
+      const [encryptedUrl, setEncryptedUrl] = useState(null);
+      const [decryptedUrl, setDecryptedUrl] = useState(null);
+      const [encData,      setEncData]      = useState(null);
+      const [fileName,     setFileName]     = useState('');
+      const [fileSize,     setFileSize]     = useState('');
+      const [dims,         setDims]         = useState(null);
+      const [dragOver,     setDragOver]     = useState(false);
+      const [encLoading,   setEncLoading]   = useState(false);
+      const [decLoading,   setDecLoading]   = useState(false);
+      const [dbState,      setDbState]      = useState('empty');
+      const [refId]        = useState('VRF-' + Math.random().toString(36).slice(2,8).toUpperCase());
+      const fileRef = useRef();
+
+      const handleFile = (file) => {
+        if (!file || !file.type.startsWith('image/')) return;
+        setFileName(file.name); setFileSize((file.size/1024).toFixed(1)+' KB');
+        setEncryptedUrl(null); setDecryptedUrl(null); setEncData(null); setDbState('original');
+        const url = URL.createObjectURL(file);
+        setOriginalUrl(url);
+        const img = new Image();
+        img.onload = () => setDims({ w:img.width, h:img.height });
+        img.src = url;
+      };
+
+      const handleEncrypt = async () => {
+        if (!originalUrl || encLoading) return;
+        setEncLoading(true); setDecryptedUrl(null);
+        try {
+          const ab = await (await fetch(originalUrl)).arrayBuffer();
+          const result = await encryptImageBytes(ab, dims?.w||400, dims?.h||300);
+          setEncData(result); setEncryptedUrl(result.noiseUrl); setDbState('encrypted');
+        } finally { setEncLoading(false); }
+      };
+
+      const handleDecrypt = async () => {
+        if (!encData || decLoading) return;
+        setDecLoading(true);
+        try {
+          setDecryptedUrl(await decryptImageBytes(encData.encryptedBuffer, encData.cryptoKey, encData.iv));
+          setDbState('decrypted');
+        } finally { setDecLoading(false); }
+      };
+
+      const reset = () => {
+        setOriginalUrl(null); setEncryptedUrl(null); setDecryptedUrl(null);
+        setEncData(null); setFileName(''); setFileSize(''); setDims(null); setDbState('empty');
+      };
+
+      const hasOriginal  = !!originalUrl;
+      const hasEncrypted = !!encryptedUrl;
+      const hasDecrypted = !!decryptedUrl;
+
+      const dbRows = {
+        empty: [],
+        original: [
+          { l:'file_name',  v: fileName||'aadhaar.jpg' },
+          { l:'file_size',  v: fileSize },
+          { l:'status',     v:'⚠️  NOT SAFE — stored as plain image', h:true },
+          { l:'readable',   v:'YES — anyone with DB access can view', h:true },
+        ],
+        encrypted: [
+          { l:'ref_id',         v: refId },
+          { l:'file',           v:'enc_'+refId.toLowerCase()+'.bin' },
+          { l:'encrypted_data', v:'Xk9mP2rQ7vL... (scrambled, unreadable)' },
+          { l:'lock_key',       v:'Stored in AWS KMS — not in this database' },
+          { l:'masked_number',  v:'XXXX-XXXX-9012' },
+          { l:'readable',       v:'✅ NO — completely unreadable without key' },
+          { l:'status',         v:'pending_verification' },
+          { l:'stored_on',      v: new Date().toLocaleString() },
+          { l:'delete_after',   v: new Date(Date.now()+30*24*60*60*1000).toLocaleDateString() },
+        ],
+        decrypted: [
+          { l:'ref_id',      v: refId },
+          { l:'accessed_by', v:'Inspector Sharma (Badge: DL-2891)' },
+          { l:'access_time', v: new Date().toLocaleString() },
+          { l:'action',      v:'🔓 Decrypted for verification' },
+          { l:'status',      v:'verification_complete' },
+          { l:'log_entry',   v:'Access recorded in audit trail' },
+          { l:'next_step',   v:'🗑️  Scheduled for deletion in 24 hours' },
+        ],
+      };
+
+      const dbCfg = {
+        empty:     { title:'Nothing stored yet',                      color:'#6B7280', bg:'#F9FAFB', border:'#E5E7EB' },
+        original:  { title:'⚠️  Stored without encryption — NOT SAFE', color:'#B45309', bg:'#FFFBEB', border:'#FCD34D' },
+        encrypted: { title:'✅ Safely stored — encrypted & locked',     color:'#15803D', bg:'#F0FDF4', border:'#86EFAC' },
+        decrypted: { title:'📋 Access logged — deletion scheduled',     color:'#1D4ED8', bg:'#EFF6FF', border:'#93C5FD' },
+      }[dbState];
+
+      return (
+        <div style={{ minHeight:'100vh', background:'#F3F4F6', fontFamily:"'Inter',sans-serif" }}>
+
+          {/* Header */}
+          <div style={{ background:'#1E3A8A', color:'#fff', padding:'1.25rem 2rem', display:'flex', alignItems:'center', gap:14 }}>
+            <div style={{ fontSize:28 }}>🔐</div>
+            <div>
+              <div style={{ fontWeight:700, fontSize:18 }}>Aadhaar Document Security</div>
+              <div style={{ fontSize:13, opacity:0.7 }}>Police Verification · Stakeholder Demo · Shows how documents are protected</div>
+            </div>
+            {hasOriginal && (
+              <button onClick={reset} style={{ marginLeft:'auto', background:'rgba(255,255,255,0.15)', border:'1px solid rgba(255,255,255,0.3)', color:'#fff', padding:'6px 14px', borderRadius:8, cursor:'pointer', fontSize:13 }}>
+                ↩ Start over
+              </button>
+            )}
+          </div>
+
+          <div style={{ maxWidth:1100, margin:'0 auto', padding:'2rem 1.5rem' }}>
+
+            {/* Upload zone */}
+            {!hasOriginal && (
+              <div onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)}
+                onDrop={e=>{e.preventDefault();setDragOver(false);handleFile(e.dataTransfer.files[0]);}}
+                onClick={()=>fileRef.current.click()}
+                style={{ border:`2.5px dashed ${dragOver?'#3B82F6':'#CBD5E1'}`, borderRadius:16, padding:'4rem 2rem', textAlign:'center', cursor:'pointer', background:dragOver?'#EFF6FF':'#fff', transition:'all 0.2s', marginBottom:'2rem' }}>
+                <div style={{ fontSize:48, marginBottom:16 }}>📁</div>
+                <div style={{ fontWeight:600, fontSize:18, color:'#1E293B', marginBottom:8 }}>Upload an Aadhaar card image to begin</div>
+                <div style={{ color:'#64748B', fontSize:14 }}>Drag & drop here, or click to choose a file · JPG, PNG, WEBP</div>
+                <input ref={fileRef} type="file" accept="image/*" onChange={e=>handleFile(e.target.files[0])} />
+              </div>
+            )}
+
+            {/* 3 Step Cards */}
+            <div style={{ display:'flex', gap:16, marginBottom:'2rem', flexWrap:'wrap' }}>
+
+              {/* STEP 1: ORIGINAL */}
+              <StepCard number="1" title="Original Document" subtitle="What you uploaded" color="blue" active={hasOriginal} done={hasEncrypted}>
+                {hasOriginal ? (
+                  <>
+                    <img src={originalUrl} alt="Original" style={{ width:'100%', borderRadius:10, border:'2px solid #BFDBFE', display:'block' }} />
+                    <div style={{ background:'#FEE2E2', border:'1px solid #FCA5A5', borderRadius:10, padding:'12px 14px' }}>
+                      <div style={{ fontWeight:600, color:'#991B1B', fontSize:13, marginBottom:4 }}>⚠️ Anyone can read this</div>
+                      <div style={{ fontSize:12, color:'#7F1D1D', lineHeight:1.6 }}>Right now this image is visible as-is. If it were saved to a database or server in this form, any hacker or unauthorised person could see the full Aadhaar card.</div>
+                    </div>
+                    <div style={{ fontSize:12, color:'#6B7280' }}>📄 {fileName} · {fileSize}{dims ? ` · ${dims.w}×${dims.h}px` : ''}</div>
+                    {!hasEncrypted && (
+                      <button onClick={handleEncrypt} disabled={encLoading}
+                        style={{ background:'#EA580C', color:'#fff', border:'none', borderRadius:10, padding:'12px', fontWeight:600, fontSize:14, cursor:encLoading?'not-allowed':'pointer', opacity:encLoading?0.7:1, marginTop:4 }}>
+                        {encLoading ? '⏳  Encrypting…' : '🔒  Encrypt this document →'}
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <div style={{ textAlign:'center', padding:'2rem 1rem', color:'#9CA3AF' }}>
+                    <div style={{ fontSize:40, marginBottom:8 }}>☝️</div>
+                    <div style={{ fontSize:13 }}>Upload an image above to start</div>
+                  </div>
+                )}
+              </StepCard>
+
+              {/* STEP 2: ENCRYPTED */}
+              <StepCard number="2" title="Encrypted (Locked)" subtitle="How it's stored on the server" color="orange" active={hasEncrypted&&!hasDecrypted} done={hasDecrypted}>
+                {hasEncrypted ? (
+                  <>
+                    <img src={encryptedUrl} alt="Encrypted" style={{ width:'100%', borderRadius:10, border:'2px solid #FED7AA', display:'block', imageRendering:'pixelated' }} />
+                    <div style={{ background:'#DCFCE7', border:'1px solid #86EFAC', borderRadius:10, padding:'12px 14px' }}>
+                      <div style={{ fontWeight:600, color:'#14532D', fontSize:13, marginBottom:4 }}>✅ Nobody can read this</div>
+                      <div style={{ fontSize:12, color:'#166534', lineHeight:1.6 }}>The document is now scrambled into random noise. Even if someone breaks into the server or database, all they see is this — completely meaningless without the secret key.</div>
+                    </div>
+                    <div style={{ background:'#FFF7ED', border:'1px solid #FED7AA', borderRadius:8, padding:'10px 12px', fontSize:12, color:'#9A3412', lineHeight:1.6 }}>
+                      🔑 <strong>The secret key</strong> is stored separately in AWS KMS (a dedicated secure vault) — it is never stored in the same place as this data.
+                    </div>
+                    {!hasDecrypted && (
+                      <button onClick={handleDecrypt} disabled={decLoading}
+                        style={{ background:'#16A34A', color:'#fff', border:'none', borderRadius:10, padding:'12px', fontWeight:600, fontSize:14, cursor:decLoading?'not-allowed':'pointer', opacity:decLoading?0.7:1, marginTop:4 }}>
+                        {decLoading ? '⏳  Unlocking…' : '🔓  Decrypt (authorised access) →'}
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <div style={{ textAlign:'center', padding:'2rem 1rem', color:'#9CA3AF' }}>
+                    <div style={{ fontSize:40, marginBottom:8 }}>🔒</div>
+                    <div style={{ fontSize:13 }}>Click Encrypt above to lock the document</div>
+                  </div>
+                )}
+              </StepCard>
+
+              {/* STEP 3: DECRYPTED */}
+              <StepCard number="3" title="Decrypted (Unlocked)" subtitle="Only authorised personnel can do this" color="green" active={hasDecrypted} done={false}>
+                {hasDecrypted ? (
+                  <>
+                    <img src={decryptedUrl} alt="Decrypted" style={{ width:'100%', borderRadius:10, border:'2px solid #BBF7D0', display:'block' }} />
+                    <div style={{ background:'#DCFCE7', border:'1px solid #86EFAC', borderRadius:10, padding:'12px 14px' }}>
+                      <div style={{ fontWeight:600, color:'#14532D', fontSize:13, marginBottom:4 }}>✅ Document perfectly restored</div>
+                      <div style={{ fontSize:12, color:'#166534', lineHeight:1.6 }}>The original document is recovered without any loss. This decryption only works with the correct key — and every access is automatically recorded in an audit log.</div>
+                    </div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+                      <div style={{ background:'#EFF6FF', border:'1px solid #BFDBFE', borderRadius:8, padding:'10px 12px', fontSize:12, color:'#1E40AF', lineHeight:1.6 }}>
+                        📋 <strong>Access is logged</strong> — who opened it, when, and why. Every decryption leaves a record.
+                      </div>
+                      <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:8, padding:'10px 12px', fontSize:12, color:'#991B1B', lineHeight:1.6 }}>
+                        🗑️ <strong>Data deletion</strong> — the document is automatically scheduled for permanent deletion once verification is complete.
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ textAlign:'center', padding:'2rem 1rem', color:'#9CA3AF' }}>
+                    <div style={{ fontSize:40, marginBottom:8 }}>🔓</div>
+                    <div style={{ fontSize:13 }}>Decrypt the document to see it restored</div>
+                  </div>
+                )}
+              </StepCard>
+            </div>
+
+            {/* Database view */}
+            <div style={{ background:'#fff', borderRadius:16, border:`2px solid ${dbCfg.border}`, overflow:'hidden', marginBottom:'2rem' }}>
+              <div style={{ background:dbCfg.bg, borderBottom:`1px solid ${dbCfg.border}`, padding:'14px 20px', display:'flex', alignItems:'center', gap:10 }}>
+                <div style={{ fontSize:20 }}>🗄️</div>
+                <div>
+                  <div style={{ fontWeight:700, color:'#111827', fontSize:15 }}>Database — what gets saved</div>
+                  <div style={{ fontSize:12, color:dbCfg.color, fontWeight:500, marginTop:2 }}>{dbCfg.title}</div>
+                </div>
+              </div>
+              <div style={{ padding:'12px 8px' }}>
+                {dbState === 'empty' && (
+                  <div style={{ textAlign:'center', padding:'2rem', color:'#9CA3AF', fontSize:14 }}>
+                    Upload a document above to see what gets saved in the database at each step.
+                  </div>
+                )}
+                {dbState !== 'empty' && (
+                  <>
+                    <div style={{ display:'flex', gap:8, padding:'4px 10px', marginBottom:4 }}>
+                      <span style={{ fontSize:10, color:'#9CA3AF', textTransform:'uppercase', letterSpacing:'0.05em', width:120 }}>Field</span>
+                      <span style={{ fontSize:10, color:'#9CA3AF', textTransform:'uppercase', letterSpacing:'0.05em' }}>Value</span>
+                    </div>
+                    <div style={{ borderRadius:8, overflow:'hidden', border:'1px solid #F3F4F6' }}>
+                      {dbRows[dbState].map((row, i) => (
+                        <div key={i} style={{ display:'flex', gap:8, alignItems:'flex-start', padding:'8px 12px', background:row.h?'#FFFBEB':i%2===0?'#FAFAFA':'#fff', borderBottom:i<dbRows[dbState].length-1?'1px solid #F3F4F6':'none' }}>
+                          <span style={{ fontSize:11.5, color:'#6B7280', width:124, flexShrink:0, fontFamily:'monospace', paddingTop:1 }}>{row.l}</span>
+                          <span style={{ fontSize:12.5, color:row.h?'#92400E':'#1F2937', fontFamily:'monospace', wordBreak:'break-all', lineHeight:1.6 }}>{row.v}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {dbState === 'original' && (
+                      <div style={{ margin:'12px 4px 4px', background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:8, padding:'12px 14px', fontSize:13, color:'#7F1D1D', lineHeight:1.6 }}>
+                        ❌ <strong>This is the wrong way.</strong> Storing the raw image means anyone with database access can view the Aadhaar card. Press Encrypt to see the difference.
+                      </div>
+                    )}
+                    {dbState === 'encrypted' && (
+                      <div style={{ margin:'12px 4px 4px', background:'#F0FDF4', border:'1px solid #BBF7D0', borderRadius:8, padding:'12px 14px', fontSize:13, color:'#14532D', lineHeight:1.6 }}>
+                        ✅ <strong>This is how we store it.</strong> The data is completely scrambled. The key that unlocks it is kept separately in AWS KMS. Even our own engineers cannot see the Aadhaar card without a controlled, logged process.
+                      </div>
+                    )}
+                    {dbState === 'decrypted' && (
+                      <div style={{ margin:'12px 4px 4px', background:'#EFF6FF', border:'1px solid #BFDBFE', borderRadius:8, padding:'12px 14px', fontSize:13, color:'#1E3A8A', lineHeight:1.6 }}>
+                        📋 <strong>Full audit trail.</strong> Every access is logged — who, when, and from which device. After verification the document and all its data are permanently deleted.
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Legend cards */}
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))', gap:12, marginBottom:'2rem' }}>
+              {[
+                { icon:'🏠', title:'Where is the file?',    text:'Encrypted & stored in AWS S3 (secure cloud storage). Not on any local server.' },
+                { icon:'🔑', title:'Where is the key?',     text:'In AWS KMS — a separate secure vault. The key and the data are never in the same place.' },
+                { icon:'📋', title:'Who can access it?',    text:'Only authorised personnel. Every access is logged. No anonymous access possible.' },
+                { icon:'🗑️', title:'When is it deleted?',  text:'As soon as verification is complete. A scheduled deletion removes the file and all records.' },
+              ].map((item, i) => (
+                <div key={i} style={{ background:'#fff', border:'1px solid #E5E7EB', borderRadius:12, padding:'14px 16px' }}>
+                  <div style={{ fontSize:22, marginBottom:6 }}>{item.icon}</div>
+                  <div style={{ fontWeight:600, fontSize:13, color:'#111827', marginBottom:4 }}>{item.title}</div>
+                  <div style={{ fontSize:12, color:'#6B7280', lineHeight:1.6 }}>{item.text}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Do we send encrypted or original? */}
+            <div style={{ background:'#fff', border:'1px solid #E5E7EB', borderRadius:16, overflow:'hidden' }}>
+              <div style={{ background:'#1E3A8A', padding:'16px 22px' }}>
+                <div style={{ fontWeight:700, fontSize:16, color:'#fff' }}>❓ Common question: Do we send the encrypted image or the original?</div>
+                <div style={{ fontSize:13, color:'#93C5FD', marginTop:4 }}>The answer changes everything about how the system is built.</div>
+              </div>
+
+              <div style={{ padding:'1.5rem', display:'flex', flexDirection:'column', gap:'1.25rem' }}>
+
+                {/* Wrong way */}
+                <div style={{ border:'2px solid #FECACA', borderRadius:12, overflow:'hidden' }}>
+                  <div style={{ background:'#FEE2E2', padding:'10px 16px', display:'flex', alignItems:'center', gap:8 }}>
+                    <span style={{ fontSize:20 }}>❌</span>
+                    <span style={{ fontWeight:700, color:'#991B1B', fontSize:14 }}>Wrong way — encrypting on the user's phone or browser</span>
+                  </div>
+                  <div style={{ padding:'14px 16px', display:'flex', flexDirection:'column', gap:10 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+                      {[
+                        { icon:'📱', label:"User's phone",       sub:'has the secret key' },
+                        { arrow:'→' },
+                        { icon:'🔒', label:'Encrypts image',     sub:'using key on phone' },
+                        { arrow:'→' },
+                        { icon:'☁️', label:'Sends scrambled data', sub:'to server' },
+                        { arrow:'→' },
+                        { icon:'🗄️', label:'Server stores it',  sub:'' },
+                      ].map((item, i) =>
+                        item.arrow
+                          ? <span key={i} style={{ color:'#FCA5A5', fontWeight:700, fontSize:18 }}>{item.arrow}</span>
+                          : <div key={i} style={{ background:'#fff', border:'1px solid #FECACA', borderRadius:8, padding:'8px 12px', textAlign:'center', minWidth:100 }}>
+                              <div style={{ fontSize:20 }}>{item.icon}</div>
+                              <div style={{ fontSize:11, fontWeight:600, color:'#7F1D1D', marginTop:2 }}>{item.label}</div>
+                              {item.sub && <div style={{ fontSize:10, color:'#9CA3AF', marginTop:1 }}>{item.sub}</div>}
+                            </div>
+                      )}
+                    </div>
+                    <div style={{ background:'#FFF7F7', border:'1px solid #FECACA', borderRadius:8, padding:'10px 14px', fontSize:13, color:'#7F1D1D', lineHeight:1.65 }}>
+                      <strong>Why this fails:</strong> To encrypt something, you need a secret key. If that key lives on the user's phone or in the browser, anyone can find it by inspecting the app's code. The "encryption" becomes meaningless — it's like putting a lock on a door but taping the key right next to it.
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right way */}
+                <div style={{ border:'2px solid #86EFAC', borderRadius:12, overflow:'hidden' }}>
+                  <div style={{ background:'#DCFCE7', padding:'10px 16px', display:'flex', alignItems:'center', gap:8 }}>
+                    <span style={{ fontSize:20 }}>✅</span>
+                    <span style={{ fontWeight:700, color:'#14532D', fontSize:14 }}>Right way — user sends the original, server encrypts before storing</span>
+                  </div>
+                  <div style={{ padding:'14px 16px', display:'flex', flexDirection:'column', gap:10 }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+                      {[
+                        { icon:'📱', label:"User's phone",       sub:'just sends the photo' },
+                        { arrow:'→' },
+                        { icon:'🔐', label:'HTTPS tunnel',        sub:'safe during travel' },
+                        { arrow:'→' },
+                        { icon:'🖥️', label:'Your server',        sub:'receives original' },
+                        { arrow:'→' },
+                        { icon:'🔑', label:'AWS KMS key',         sub:'encrypts it here' },
+                        { arrow:'→' },
+                        { icon:'☁️', label:'S3 stores noise',     sub:'original never saved' },
+                      ].map((item, i) =>
+                        item.arrow
+                          ? <span key={i} style={{ color:'#86EFAC', fontWeight:700, fontSize:18 }}>{item.arrow}</span>
+                          : <div key={i} style={{ background:'#fff', border:'1px solid #BBF7D0', borderRadius:8, padding:'8px 12px', textAlign:'center', minWidth:90 }}>
+                              <div style={{ fontSize:20 }}>{item.icon}</div>
+                              <div style={{ fontSize:11, fontWeight:600, color:'#14532D', marginTop:2 }}>{item.label}</div>
+                              {item.sub && <div style={{ fontSize:10, color:'#9CA3AF', marginTop:1 }}>{item.sub}</div>}
+                            </div>
+                      )}
+                    </div>
+                    <div style={{ background:'#F0FDF4', border:'1px solid #BBF7D0', borderRadius:8, padding:'10px 14px', fontSize:13, color:'#14532D', lineHeight:1.65 }}>
+                      <strong>Why this is safe:</strong> The secret key never leaves our secure server. The user just uploads a normal photo — the encryption happens automatically the moment it arrives, before it is ever written to disk. The original image exists in our system's memory for less than a second.
+                    </div>
+                  </div>
+                </div>
+
+                {/* Step by step */}
+                <div style={{ background:'#F8FAFC', border:'1px solid #E2E8F0', borderRadius:12, padding:'16px' }}>
+                  <div style={{ fontWeight:700, fontSize:14, color:'#1E293B', marginBottom:14 }}>📋 What actually happens, step by step</div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:0 }}>
+                    {[
+                      { n:'1', color:'#3B82F6', bg:'#EFF6FF', bd:'#BFDBFE', icon:'📤', title:'User submits the form',                    desc:'They fill in their name, select the Aadhaar image, tick the consent box, and press Submit. The image travels to our server over HTTPS — the connection itself is encrypted, like a sealed envelope during delivery.' },
+                      { n:'2', color:'#8B5CF6', bg:'#F5F3FF', bd:'#DDD6FE', icon:'🖥️', title:'Server receives the original image in RAM', desc:'The image arrives on our server but is never written to disk in its original form. It only exists in temporary memory for a fraction of a second.' },
+                      { n:'3', color:'#F59E0B', bg:'#FFFBEB', bd:'#FDE68A', icon:'🔑', title:'Server asks AWS KMS for a secret key',       desc:"AWS KMS (Key Management Service) is a secure vault run by Amazon. Our server asks it for an encryption key. KMS generates one and hands it over — securely, over an encrypted connection." },
+                      { n:'4', color:'#EF4444', bg:'#FEF2F2', bd:'#FECACA', icon:'🔒', title:'Image is encrypted using that key',           desc:'The original image is scrambled into unreadable noise using the key. This is the AES-256-GCM process you saw in the demo above.' },
+                      { n:'5', color:'#10B981', bg:'#F0FDF4', bd:'#BBF7D0', icon:'☁️', title:'Only the scrambled version is saved',         desc:'The encrypted noise is stored in AWS S3. The key is returned to KMS — it never stays on our server. The original image is wiped from memory. What remains is 100% unreadable without KMS.' },
+                      { n:'6', color:'#6B7280', bg:'#F9FAFB', bd:'#E5E7EB', icon:'🗑️', title:'Scheduled deletion after verification',       desc:'Once the police verification is marked complete, an automatic process permanently deletes the encrypted file from S3, the database record, and the KMS key entry. Nothing remains.' },
+                    ].map((step, i, arr) => (
+                      <div key={i} style={{ display:'flex', gap:12, paddingBottom:i<arr.length-1?16:0, position:'relative' }}>
+                        {i < arr.length-1 && <div style={{ position:'absolute', left:17, top:36, width:2, height:'calc(100% - 20px)', background:'#E2E8F0' }} />}
+                        <div style={{ width:36, height:36, borderRadius:'50%', background:step.bg, border:`2px solid ${step.bd}`, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, zIndex:1 }}>
+                          <span style={{ fontSize:15 }}>{step.icon}</span>
+                        </div>
+                        <div style={{ paddingTop:6, flex:1 }}>
+                          <div style={{ fontWeight:600, fontSize:13, color:'#1E293B', marginBottom:4 }}>
+                            <span style={{ background:step.bg, color:step.color, border:`1px solid ${step.bd}`, borderRadius:4, padding:'1px 7px', fontSize:11, fontWeight:700, marginRight:7 }}>Step {step.n}</span>
+                            {step.title}
+                          </div>
+                          <div style={{ fontSize:12.5, color:'#64748B', lineHeight:1.65 }}>{step.desc}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Summary bar */}
+                <div style={{ background:'#1E3A8A', borderRadius:10, padding:'14px 18px', display:'flex', alignItems:'center', gap:12 }}>
+                  <span style={{ fontSize:24, flexShrink:0 }}>💡</span>
+                  <div style={{ fontSize:14, color:'#fff', lineHeight:1.6 }}>
+                    <strong>Bottom line:</strong> The user always sends the original image. Our server encrypts it the moment it arrives, before saving anything. The user never needs to know encryption is happening — it is completely automatic and invisible to them.
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
